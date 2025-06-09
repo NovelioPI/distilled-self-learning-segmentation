@@ -4,34 +4,38 @@ from segmentation_models_pytorch.losses import DiceLoss
 from segmentation_models_pytorch.metrics import get_stats, accuracy, iou_score, f1_score
 import segmentation_models_pytorch as smp
 
-def build_student_model(encoder='timm-efficientnet-b0', decoder='unet', weight=None):
+def build_student_model(encoder='timm-efficientnet-b0', decoder='unet', weight=None, dropout=0.0):
     if decoder == 'unet':
         return smp.Unet(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
             classes=19,
+            decoder_dropout=dropout
         )
     elif decoder == 'fpn':
         return smp.FPN(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
-            classes=19
+            classes=19,
+            decoder_dropout=dropout
         )
     elif decoder == 'deeplabv3':
         return smp.DeepLabV3(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
-            classes=19
+            classes=19,
+            decoder_dropout=dropout
         )
     elif decoder == 'segformer':
         return smp.Segformer(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
-            classes=19
+            classes=19,
+            decoder_dropout=dropout
         )
     else:
         raise ValueError(f"Unsupported decoder: {decoder}. Supported decoders are 'unet', 'fpn', 'deeplabv3', and 'segformer'.")
