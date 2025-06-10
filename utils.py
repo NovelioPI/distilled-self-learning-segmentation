@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from torch.nn import CrossEntropyLoss, KLDivLoss
 from segmentation_models_pytorch.losses import DiceLoss
 from segmentation_models_pytorch.metrics import get_stats, accuracy, iou_score, f1_score
@@ -6,52 +7,54 @@ import segmentation_models_pytorch as smp
 
 def build_student_model(encoder='timm-efficientnet-b0', decoder='unet', weight=None, dropout=0.0):
     if decoder == 'unet':
-        return smp.Unet(
+        model = smp.Unet(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
             classes=19,
-            decoder_dropout=dropout
         )
     elif decoder == 'fpn':
-        return smp.FPN(
+        model = smp.FPN(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
             classes=19,
-            decoder_dropout=dropout
         )
     elif decoder == 'deeplabv3':
-        return smp.DeepLabV3(
+        model = smp.DeepLabV3(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
             classes=19,
-            decoder_dropout=dropout
         )
     elif decoder == 'segformer':
-        return smp.Segformer(
+        model = smp.Segformer(
             encoder_name=encoder,
             encoder_weights=weight if weight else None,
             in_channels=3,
             classes=19,
-            decoder_dropout=dropout
         )
     else:
         raise ValueError(f"Unsupported decoder: {decoder}. Supported decoders are 'unet', 'fpn', 'deeplabv3', and 'segformer'.")
+    
+    if dropout > 0:
+        model.decoder.dropout = nn.Dropout(dropout)
+    
+    return model
 
 _ce = CrossEntropyLoss(ignore_index=255)
-_kl = KLDivLoss(reduction='batchmean')
 _dice = DiceLoss(mode='multiclass', ignore_index=255)
-def compute_loss(student_output, hard_labels, soft_labels, use_kd=True, kd_weight=0.5):
-    ce_loss = _ce(student_output, hard_labels)
-    dice_loss = _dice(student_output, hard_labels)
+_kl = KLDivLoss(reduction='batchmean')
+def compute_loss(student_logits, hard_labels, teacher_logits, use_kd=True, kd_weight=0.5, T=2.0):
+    ce_loss = _ce(student_logits, hard_labels)
+    dice_loss = _dice(student_logits, hard_labels)
     seg_loss = ce_loss + dice_loss
     
     if use_kd:
-        log_probs_student = torch.log_softmax(student_output, dim=1)
-        soft_loss = _kl(log_probs_student, soft_labels)
-        loss = kd_weight * soft_loss + (1 - kd_weight) * seg_loss
+        log_probs_student = torch.log_softmax(student_logits / T, dim=1)
+        probs_teacher = torch.softmax(teacher_logits / T, dim=1)
+        soft_loss = _kl(log_probs_student, probs_teacher) * (T ** 2)
+        loss = kd_weight * soft_loss + seg_loss
     else:
         loss = seg_loss
         
