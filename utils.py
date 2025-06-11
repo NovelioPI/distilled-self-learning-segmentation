@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss, KLDivLoss
 from segmentation_models_pytorch.losses import DiceLoss
 from segmentation_models_pytorch.metrics import get_stats, accuracy, iou_score, f1_score
@@ -42,18 +43,19 @@ def build_student_model(encoder='timm-efficientnet-b0', decoder='unet', weight=N
     
     return model
 
-_ce = CrossEntropyLoss(ignore_index=255)
-_dice = DiceLoss(mode='multiclass', ignore_index=255)
-_kl = KLDivLoss(reduction='batchmean')
-def compute_loss(student_logits, hard_labels, teacher_logits, use_kd=True, kd_weight=0.5, T=2.0):
-    ce_loss = _ce(student_logits, hard_labels)
-    dice_loss = _dice(student_logits, hard_labels)
+def compute_loss(student_logits, hard_labels, teacher_logits=None, use_kd=True, kd_weight=0.5, T=2.0):
+    ce = CrossEntropyLoss(ignore_index=255)
+    dice = DiceLoss(mode='multiclass', ignore_index=255)
+    kl = KLDivLoss(reduction='batchmean')
+    
+    ce_loss = ce(student_logits, hard_labels)
+    dice_loss = dice(student_logits, hard_labels)
     seg_loss = ce_loss + dice_loss
     
     if use_kd:
         log_probs_student = torch.log_softmax(student_logits / T, dim=1)
         probs_teacher = torch.softmax(teacher_logits / T, dim=1)
-        soft_loss = _kl(log_probs_student, probs_teacher) * (T ** 2)
+        soft_loss = kl(log_probs_student, probs_teacher) * (T ** 2)
         loss = kd_weight * soft_loss + seg_loss
     else:
         loss = seg_loss
@@ -63,7 +65,36 @@ def compute_loss(student_logits, hard_labels, teacher_logits, use_kd=True, kd_we
         'seg': seg_loss,
         'kd': soft_loss if use_kd else None
     }
-
+    
+def negative_sampling_loss(student_logits, teacher_probs, confidence_threshold=0.5, topk=3):
+    max_conf, _ = torch.max(teacher_probs, dim=1)
+    ambigous_mask = max_conf <= confidence_threshold
+    
+    topk_vals, topk_indices = teacher_probs.topk(topk, dim=1)
+    
+    loss = 0.0
+    count = 0
+    for k in range(topk):
+        neg_class = topk_indices[:, k]
+        masked_indices = ambigous_mask.nonzero(as_tuple=False)
+        
+        if masked_indices.numel() == 0:
+            continue
+        
+        batch_idx, h_idx, w_idx = masked_indices[:, 0], masked_indices[:, 1], masked_indices[:, 2]
+        student_logits_flat = student_logits[batch_idx, :, h_idx, w_idx]
+        neg_class_flat = neg_class[batch_idx, h_idx, w_idx]
+        
+        neg_loss = F.cross_entropy(student_logits_flat, neg_class_flat, reduction='mean')
+        loss += neg_loss
+        count += 1
+    
+    if count > 0:
+        loss /= count
+    else:
+        loss = torch.tensor(0.0, device=student_logits.device)
+    
+    return loss
 
 def compute_metrics(preds, labels, num_classes=19, ignore_index=255):
     tp, fp, tn, fn = get_stats(preds, labels, mode='multiclass', num_classes=num_classes, ignore_index=ignore_index)
