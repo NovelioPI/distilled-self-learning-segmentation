@@ -35,6 +35,8 @@ class UGMDataset(Dataset):
         self.root = Path(root)
         self.return_teacher_logits = return_teacher_logits
         self.size = size
+        self.num_classes = 19
+        self.ignore_index = 255
         
         self.data = list((self.root / 'camera' / 'rgb').glob('*.png'))
         self.data.sort()
@@ -67,7 +69,10 @@ class UGMDataset(Dataset):
                 logits = augmented['mask'].permute(2, 0, 1)
                 return image, logits
 
-        return image
+        if self.return_teacher_logits:
+            return image, torch.tensor(logits, dtype=torch.float32).permute(2, 0, 1)
+        else:
+            return image
             
     def get_image_path(self, idx):
         if 0 <= idx < len(self.data):
