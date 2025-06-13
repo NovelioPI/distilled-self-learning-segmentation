@@ -5,14 +5,11 @@ from utils import (
     build_hyperparameters,
     build_student_model,
     compute_loss,
-    negative_sampling_loss,
     compute_metrics,
-    colorize_segmentation,
-    CurriculumScheduler
+    colorize_segmentation
 )
 from dataset.ugm import UGMDataModule
 import os
-from models.refinement import EncoderPRN
 
 
 class BaseModel(pl.LightningModule):
@@ -46,33 +43,22 @@ class BaseModel(pl.LightningModule):
         self.student = build_student_model(
             encoder=encoder, decoder=decoder, weight=weight, dropout=decoder_dropout
         )
-        
-        self.prn = EncoderPRN(
-            in_channels=self.num_classes+3,
-            num_classes=self.num_classes,
-            mid_channels=32,
-        )
-        self.prn.eval()
-        
-        self.curriculum_scheduler = CurriculumScheduler()
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            list(self.student.parameters()) + list(self.prn.parameters()), lr=self.lr, weight_decay=self.weight_decay
-        )
+        optimizer = torch.optim.AdamW(self.student.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=2, verbose=True)
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch", "monitor": "loss/total/val"}]
 
     def step(self, batch, stage="train"):
         if self.use_refinement:
-            images, pseudo_labels = batch
+            images, t_logits, pseudo_labels = batch
         else:
             images, t_logits = batch
-            s_logits = self.student(images)
-            preds = torch.argmax(s_logits, dim=1)
-
             t_probs = F.softmax(t_logits, dim=1)
             _, pseudo_labels = t_probs.max(dim=1)
+            
+        s_logits = self.student(images)
+        preds = torch.argmax(s_logits, dim=1)
         
         loss = compute_loss(
             s_logits,
@@ -185,7 +171,7 @@ if __name__ == "__main__":
     DECODER = ["unet"]
     WEIGHT = ["imagenet"]
     DECODER_DROPOUT = [0.5]
-    ENTROPY_THRESHOLD = [0.85, 0.75, 0.65]
+    ENTROPY_THRESHOLD = [1.0, 0.05, 0.15, 0.35, 0.45]
     USE_REFINEMENT = [True]
     USE_CURRICULUM_THR = [False]
     USE_NEG_LOSS = [False]
@@ -230,6 +216,8 @@ if __name__ == "__main__":
         dm = UGMDataModule(
             root="/media/esr/ssd0/dataset/2025-01-10/",
             return_teacher_logits=True,
+            use_refinement=params["use_refinement"],
+            entropy_threshold=params["entropy_threshold"],
             batch_size=BATCH_SIZE,
             size=SIZE,
         )
@@ -241,10 +229,10 @@ if __name__ == "__main__":
             f"{kd_str}_{SIZE[0]}x{SIZE[1]}"
         )
         if params['use_refinement']:
-            prefix = "refinement"
-            version = f"{prefix}_{version}"
-        if params['entropy_threshold'] < 1.0:
-            prefix = f"entropy-{params['entropy_threshold']}"
+            if params['entropy_threshold'] < 1.0:
+                prefix = f"refinement_thr-{params['entropy_threshold']}"
+            else:
+                prefix = "refinement"
             version = f"{prefix}_{version}"
         if params['use_curriculum_thr']:
             prefix = "curriculum_thr"

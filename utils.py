@@ -5,11 +5,11 @@ from torch.nn import CrossEntropyLoss, KLDivLoss
 from segmentation_models_pytorch.losses import DiceLoss
 from segmentation_models_pytorch.metrics import get_stats, accuracy, iou_score, f1_score
 import segmentation_models_pytorch as smp
-import math
-import numpy as np
+import itertools
 import pydensecrf.densecrf as dcrf
 from pydensecrf.utils import unary_from_softmax
-import itertools
+import numpy as np
+
 
 
 def build_hyperparameters(params: dict):
@@ -167,70 +167,69 @@ def colorize_segmentation(image, num_classes=19):
         color_image[mask] = color_map[c]
     return color_image.permute(2, 0, 1)
 
-def compute_entropy(prob, eps=1e-10, dim=1):
-    return -torch.sum(prob * torch.log(prob + eps), dim=dim)
-
-def uncertainty_masking(entropy, threshold=0.7):
-    max_entropy = torch.log(torch.tensor(entropy.size(1), dtype=entropy.dtype, device=entropy.device))
-    normalized_entropy = entropy / max_entropy
-    return normalized_entropy < threshold
-
-def crf_refinement(image, prob, sxy=15, srgb=20, compat=5, n_iters=5):
-    h, w = image.shape[:2]
-    n_classes = prob.shape[0]
+def entropy(probs):
+    """
+    Compute the entropy of the predicted probabilities.
     
-    # Setup CRF
-    d = dcrf.DenseCRF2D(w, h, n_classes)
-    unary = unary_from_softmax(prob)
+    Args:
+        probs (torch.Tensor): Predicted probabilities of shape (C, H, W) or (B, C, H, W).
+        
+    Returns:
+        torch.Tensor: Entropy of shape (H, W) or (B, H, W).
+    """
+    if probs.dim() == 3:  # (C, H, W)
+        dim = 0
+    elif probs.dim() == 4:  # (B, C, H, W)
+        dim = 1
+    return -torch.sum(probs * torch.log(probs + 1e-10), dim=dim)  # Avoid log(0) with small epsilon
+
+def normalize_entropy(probs):
+    """
+    Normalize the entropy values to the range [0, 1].
+    
+    Args:
+        probs (torch.Tensor): Predicted probabilities of shape (C, H, W) or (B, C, H, W).
+        
+    Returns:
+        torch.Tensor: Normalized entropy of shape (H, W) or (B, H, W).
+    """
+    if probs.dim() == 3:  # (C, H, W)
+        dim = 0
+    elif probs.dim() == 4:  # (B, C, H, W)
+        dim = 1
+    ent = entropy(probs)
+    max_ent = torch.log(torch.tensor(probs.shape[dim], dtype=probs.dtype, device=probs.device))
+    return ent / max_ent
+
+def refine_pseudo_labels(image, prob, iters=10, sxy=3, srgb=20, compat=3):
+    """
+    Refine pseudo labels using DenseCRF.
+    Args:
+        image (torch.Tensor): Input image of shape (C, H, W).
+        prob (torch.Tensor): Predicted probabilities of shape (C, H, W).
+        iters (int): Number of CRF iterations.
+        sxy (int): Spatial kernel size.
+        srgb (int): RGB kernel size.
+        compat (int): Compatibility factor for pairwise potentials.
+    Returns:
+        torch.Tensor: Refined pseudo labels of shape (H, W).
+    """
+    # Ensure input is on CPU and in the correct format
+    image = image.permute(1, 2, 0).cpu().numpy()  # [H, W, C]
+    image = (image * 255).astype(np.uint8).copy(order='C')
+    
+    # Apply CRF
+    c, h, w = prob.shape
+    d = dcrf.DenseCRF2D(h, w, c)
+    unary = unary_from_softmax(prob.numpy()) 
     d.setUnaryEnergy(unary)
     
-    # Add spatial and color kernels
-    d.addPairwiseGaussian(sxy=sxy, compat=compat)
-    d.addPairwiseBilateral(
-        sxy=sxy,
-        srgb=srgb,
-        rgbim=image,
-        compat=compat
-    )
+    # pair-wise Gaussian (smooth)
+    d.addPairwiseGaussian(sxy=sxy, compat=compat, kernel=dcrf.DIAG_KERNEL, normalization=dcrf.NORMALIZE_SYMMETRIC)
     
-    # Run inference
-    Q = d.inference(n_iters)
-    return np.array(Q).reshape((n_classes, h, w))
-
-def refine_pseudo_labels(images, probs, entropy_threshold=0.7):
-    refined_labels = []
-    for i in range(len(images)):
-        image_np = images[i].cpu().numpy().transpose(1, 2, 0)  # Convert to HWC
-        image_np = (image_np * 255).astype(np.uint8).copy(order='C')
-        prob_np = probs[i].cpu().numpy()  # Shape: (num_classes, H, W)
-        
-        entropy = compute_entropy(probs[i])
-        mask = uncertainty_masking(entropy, threshold=entropy_threshold)
-        
-        refined_prob = crf_refinement(image_np, prob_np)
-        pseudo_label = torch.argmax(torch.tensor(refined_prob), dim=0)  # Shape: (H, W)
-        
-        pseudo_label[~mask] = 255  # Set uncertain pixels to ignore index (255)
-        refined_labels.append(pseudo_label.unsqueeze(0))
+    # pair-wise bilateral (edge-aware)
+    d.addPairwiseBilateral(sxy=sxy, srgb=srgb, rgbim=image, compat=compat, kernel=dcrf.DIAG_KERNEL, normalization=dcrf.NORMALIZE_SYMMETRIC)
     
-    return torch.stack(refined_labels).squeeze(1).to(device=images.device, dtype=torch.long)
-    
-
-class CurriculumScheduler:
-    def __init__(self,
-                 max_thr: float = 0.95,
-                 min_thr: float = 0.85,
-                 steps: int = 50,
-                 mode: str = "cosine"):
-        self.max_thr = max_thr
-        self.min_thr = min_thr
-        self.steps = steps
-        self.mode = mode
-
-    def __call__(self, current_step: int) -> float:
-        current_step = min(current_step, self.steps)
-        if self.mode == "linear":
-            p = current_step / self.steps
-        else:  # cosine (default)
-            p = 0.5 * (1 - math.cos(math.pi * current_step / self.steps))
-        return self.max_thr - p * (self.max_thr - self.min_thr)
+    Q = d.inference(iters)  # Run inference
+    refined = np.array(Q).reshape((c, h, w)).argmax(axis=0)
+    return refined.astype(np.uint8)
