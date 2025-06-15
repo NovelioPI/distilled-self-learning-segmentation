@@ -6,10 +6,10 @@ from utils import (
     build_student_model,
     compute_loss,
     compute_metrics,
+    normalize_entropy,
     colorize_segmentation
 )
 from dataset.ugm import UGMDataModule
-import os
 
 
 class BaseModel(pl.LightningModule):
@@ -44,11 +44,16 @@ class BaseModel(pl.LightningModule):
             encoder=encoder, decoder=decoder, weight=weight, dropout=decoder_dropout
         )
 
+    def forward(self, x):
+        return self.student(x)
+    
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.student.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=2, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.2, patience=2, verbose=True
+        )
         return [optimizer], [{"scheduler": scheduler, "interval": "epoch", "monitor": "loss/total/val"}]
-
+    
     def step(self, batch, stage="train"):
         if self.use_refinement:
             images, t_logits, pseudo_labels = batch
@@ -56,8 +61,14 @@ class BaseModel(pl.LightningModule):
             images, t_logits = batch
             t_probs = F.softmax(t_logits, dim=1)
             _, pseudo_labels = t_probs.max(dim=1)
+        
+        if self.entropy_threshold < 1.0 and stage == "train":
+            t_probs = F.softmax(t_logits, dim=1)
+            entropy = normalize_entropy(t_probs)
+            mask = entropy < self.entropy_threshold
+            pseudo_labels[~mask] = self.ignore_index
             
-        s_logits = self.student(images)
+        s_logits = self(images)
         preds = torch.argmax(s_logits, dim=1)
         
         loss = compute_loss(
@@ -84,7 +95,7 @@ class BaseModel(pl.LightningModule):
             "pred": preds[0],
         }
 
-    def logging(self, step_output, stage="train"):
+    def log_step_outputs(self, step_output, stage="train"):
         # Log losses
         self.log(
             f"loss/total/{stage}",
@@ -115,10 +126,10 @@ class BaseModel(pl.LightningModule):
                 )
 
         # Log images every 10 steps for non-training stages
-        if stage != "train":
+        if stage != "train" and hasattr(self.logger, "experiment") and hasattr(self.logger.experiment, "add_image"):
             self.logger.experiment.add_image(
                 f"{stage}_samples/image",
-                step_output["image"],
+                step_output["image"].detach().cpu(),
                 self.global_step,
                 dataformats="CHW",
             )
@@ -136,28 +147,33 @@ class BaseModel(pl.LightningModule):
             )
 
     def on_train_epoch_start(self):
-        self.log("lr", self.trainer.optimizers[0].param_groups[0]["lr"])
+        if hasattr(self, "trainer") and hasattr(self.trainer, "optimizers"):
+            if self.trainer.optimizers:
+                lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+                self.log("lr", lr, prog_bar=True, sync_dist=True)
 
     def training_step(self, batch, _):
-        self.student.train()
         output = self.step(batch, stage="train")
-        self.logging(output, stage="train")
+        self.log_step_outputs(output, stage="train")
         return output["loss"]["total"]
 
     def validation_step(self, batch, _):
-        self.student.eval()
-        with torch.no_grad():
-            output = self.step(batch, stage="val")
-        self.logging(output, stage="val")
+        output = self.step(batch, stage="val")
+        self.log_step_outputs(output, stage="val")
         return output["loss"]["total"]
 
     def test_step(self, batch, _):
-        self.student.eval()
-        with torch.no_grad():
-            output = self.step(batch, stage="test")
-        self.logging(output, stage="test")
+        output = self.step(batch, stage="test")
+        self.log_step_outputs(output, stage="test")
         return output["loss"]["total"]
-
+    
+    def predict_step(self, batch, _):
+        self.eval()
+        with torch.no_grad():
+            output = self.step(batch, stage="predict")
+        return output["pred"]
+    
+    
 if __name__ == "__main__":
     torch.hub.set_dir("/media/esr/ssd0/cache")
     pl.seed_everything(42, workers=True)
@@ -171,10 +187,8 @@ if __name__ == "__main__":
     DECODER = ["unet"]
     WEIGHT = ["imagenet"]
     DECODER_DROPOUT = [0.5]
-    ENTROPY_THRESHOLD = [1.0, 0.05, 0.15, 0.35, 0.45]
+    ENTROPY_THRESHOLD = [0.05, 0.15, 0.25, 0.35, 0.45]
     USE_REFINEMENT = [True]
-    USE_CURRICULUM_THR = [False]
-    USE_NEG_LOSS = [False]
     
     SIZE = (256, 256)
     BATCH_SIZE = 12  # Batch sizes
@@ -190,8 +204,6 @@ if __name__ == "__main__":
         "decoder_dropout": DECODER_DROPOUT,
         "entropy_threshold": ENTROPY_THRESHOLD,
         "use_refinement": USE_REFINEMENT,
-        "use_curriculum_thr": USE_CURRICULUM_THR,
-        "use_neg_loss": USE_NEG_LOSS,
     }
     combinations_dict = build_hyperparameters(hyperparameter_list)
 
@@ -209,15 +221,13 @@ if __name__ == "__main__":
             decoder_dropout=params["decoder_dropout"],
             entropy_threshold=params["entropy_threshold"],
             use_refinement=params["use_refinement"],
-            use_curriculum_thr=params["use_curriculum_thr"],
-            use_neg_loss=params["use_neg_loss"],
         )
 
         dm = UGMDataModule(
             root="/media/esr/ssd0/dataset/2025-01-10/",
             return_teacher_logits=True,
             use_refinement=params["use_refinement"],
-            entropy_threshold=params["entropy_threshold"],
+            entropy_threshold=1.0,
             batch_size=BATCH_SIZE,
             size=SIZE,
         )
@@ -229,19 +239,13 @@ if __name__ == "__main__":
             f"{kd_str}_{SIZE[0]}x{SIZE[1]}"
         )
         if params['use_refinement']:
-            if params['entropy_threshold'] < 1.0:
+            if params['entropy_threshold']:
                 prefix = f"refinement_thr-{params['entropy_threshold']}"
             else:
                 prefix = "refinement"
             version = f"{prefix}_{version}"
-        if params['use_curriculum_thr']:
-            prefix = "curriculum_thr"
-            version = f"{prefix}_{version}"
-        if params['use_neg_loss']:
-            prefix = "neg_loss"
-            version = f"{prefix}_{version}"
             
-        name = f"{params['encoder']}_{params['decoder']}"
+        name = f"test-thr_{params['encoder']}_{params['decoder']}"
         logger = pl.loggers.TensorBoardLogger("logs/", name=name, version=version)
         trainer = pl.Trainer(
             max_epochs=100,
@@ -252,12 +256,15 @@ if __name__ == "__main__":
                 pl.callbacks.EarlyStopping(
                     monitor="loss/total/val", patience=7, mode="min", verbose=True
                 ),
+                pl.callbacks.ModelCheckpoint(
+                    monitor="loss/total/val",
+                    dirpath=f"saved_models/{name}/{version}",
+                    filename="best",
+                    save_top_k=1,
+                    mode="min",
+                ),
+                pl.callbacks.LearningRateMonitor(logging_interval='epoch'),
             ],
         )
         trainer.fit(model, dm)
         trainer.test(model, dm)
-
-        # Save the model
-        save_dir = f"saved_models/{name}/{version}/last.pth"
-        os.makedirs(os.path.dirname(save_dir), exist_ok=True)
-        torch.save(model.state_dict(), save_dir)
