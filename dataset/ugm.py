@@ -16,25 +16,21 @@ class UGMDataset(Dataset):
                  split=None,
                  return_teacher_logits=False,
                  use_refinement=False,
-                 entropy_threshold=1.0,
                  **kwargs
                  ):
         self.root = Path(root)
         self.size = size
-        self.split = split
+        self.split = split if split != 'predict' else None
         self.return_teacher_logits = return_teacher_logits
         self.use_refinement = use_refinement
         self.num_classes = 19
         self.use_transform = kwargs.get('use_transform', True)
         
-        # Validate parameters
-        assert entropy_threshold in [1.0, 0.05, 0.15, 0.25, 0.35, 0.45], "Invalid entropy threshold value."
-        
-        if split is None:
+        if self.split is None:
             self.images = list((self.root / "camera/rgb").glob("*.png"))
             self.images.sort()
         else:
-            with open(self.root / f"{split}.json", 'r') as file:
+            with open(self.root / f"{self.split}.json", 'r') as file:
                 self.data = json.load(file)
             self.data = [v for k, v in self.data.items()]
             self.images = [self.root / f"camera/rgb/{img}.png" for img in self.data]
@@ -64,7 +60,7 @@ class UGMDataset(Dataset):
         
         teacher_path = self.root / "camera/seg/pseudo_labels_segformer_b5"
         if return_teacher_logits:
-            if split is None:
+            if self.split is None:
                 self.teacher_logits = [p for p in (teacher_path / "logits").glob("*.npy")]
             else:
                 self.teacher_logits = [teacher_path / f"logits/{name}.npy" for name in self.data]
@@ -72,10 +68,8 @@ class UGMDataset(Dataset):
             self.augmentation.add_targets({'t_logits': 'mask'})
             self.transform.add_targets({'t_logits': 'mask'})
         if use_refinement:
-            if split is None:
-                self.refined_labels = [p for p in (teacher_path / f"refined-{entropy_threshold}_pseudo_labels").glob("*.png") if '_colorized' not in p.stem]
-            elif split == "train":
-                self.refined_labels = [teacher_path / f"refined-{entropy_threshold}_pseudo_labels/{name}.png" for name in self.data]
+            if self.split is None:
+                self.refined_labels = [p for p in (teacher_path / "refined-1.0_pseudo_labels").glob("*.png") if '_colorized' not in p.stem]
             else:
                 self.refined_labels = [teacher_path / f"refined-1.0_pseudo_labels/{name}.png" for name in self.data]
             self.refined_labels.sort()
@@ -167,6 +161,14 @@ class UGMDataModule(pl.LightningDataModule):
             use_refinement=self.use_refinement,
             entropy_threshold=self.entropy_threshold
         )
+        self.predict_dataset = UGMDataset(
+            root=self.root,
+            size=self.size,
+            split="predict",
+            return_teacher_logits=self.return_teacher_logits,
+            use_refinement=self.use_refinement,
+            entropy_threshold=self.entropy_threshold
+        )
 
     def train_dataloader(self):
         return DataLoader(
@@ -190,6 +192,15 @@ class UGMDataModule(pl.LightningDataModule):
         return DataLoader(
             self.test_dataset,
             batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
+    
+    def predict_dataloader(self):
+        return DataLoader(
+            self.predict_dataset,
+            batch_size=1,
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=True
