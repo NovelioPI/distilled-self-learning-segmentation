@@ -10,7 +10,7 @@ from utils import (
     colorize_segmentation
 )
 from dataset.ugm import UGMDataModule
-from rl_threshold_callback import RLThresholdCallback
+# from rl_threshold_callback import RLThresholdCallback
 
 
 class BaseModel(pl.LightningModule):
@@ -156,11 +156,11 @@ class BaseModel(pl.LightningModule):
                 dataformats="CHW",
             )
 
-    def on_train_epoch_start(self):
-        if hasattr(self, "trainer") and hasattr(self.trainer, "optimizers"):
-            if self.trainer.optimizers:
-                lr = self.trainer.optimizers[0].param_groups[0]["lr"]
-                self.log("lr", lr, prog_bar=True, sync_dist=True)
+    # def on_train_epoch_start(self):
+    #     if hasattr(self, "trainer") and hasattr(self.trainer, "optimizers"):
+    #         if self.trainer.optimizers:
+    #             lr = self.trainer.optimizers[0].param_groups[0]["lr"]
+    #             self.log("lr", lr, prog_bar=True, sync_dist=True)
 
     def training_step(self, batch, _):
         output = self.step(batch, stage="train")
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     pl.seed_everything(42, workers=True)
 
     # Parameters
-    USE_KD = [False]
+    USE_KD = [True]
     T = [2.0]
     KD_WEIGHT = [0.001]
     LR = [1e-3]
@@ -197,8 +197,8 @@ if __name__ == "__main__":
     DECODER = ["unet"]
     WEIGHT = ["imagenet"]
     DECODER_DROPOUT = [0.5]
-    ENTROPY_THRESHOLD = [1.0]
-    USE_REFINEMENT = [False]
+    ENTROPY_THRESHOLD = [0.35]
+    USE_REFINEMENT = [True]
     
     SIZE = (256, 256)
     BATCH_SIZE = 12  # Batch sizes
@@ -256,18 +256,17 @@ if __name__ == "__main__":
                 prefix = "refinement"
             version = f"{prefix}_{version}"
             
-        name = f"test_{params['encoder']}_{params['decoder']}"
+        name = f"{params['encoder']}_{params['decoder']}"
         logger = pl.loggers.TensorBoardLogger("logs/", name=name, version=version)
         trainer = pl.Trainer(
-            max_epochs=20,
+            max_epochs=50,
             accelerator="gpu",
             devices=1,
-            precision=16,
             logger=logger,
             callbacks=[
-                # pl.callbacks.EarlyStopping(
-                #     monitor="loss/total/val", patience=7, mode="min", verbose=True
-                # ),
+                pl.callbacks.EarlyStopping(
+                    monitor="loss/total/val", patience=7, mode="min", verbose=True
+                ),
                 pl.callbacks.ModelCheckpoint(
                     monitor="loss/total/val",
                     dirpath=f"saved_models/{name}/{version}",
@@ -276,7 +275,7 @@ if __name__ == "__main__":
                     mode="min",
                 ),
                 pl.callbacks.LearningRateMonitor(logging_interval='epoch'),
-                RLThresholdCallback(metric_name="iou/micro_imagewise/val", epsilon=0.1)
+                # RLThresholdCallback(metric_name="iou/micro_imagewise/val", epsilon=0.1)
             ],
         )
         trainer.fit(model, dm)

@@ -4,9 +4,10 @@ from PIL import Image
 from pathlib import Path
 import pytorch_lightning as pl
 from transformers import SegformerImageProcessor
+from torchvision.datasets import Cityscapes
 
 class CityscapeDataset(Dataset):
-    def __init__(self, root, processor, split='train', size=(1024, 1024)):
+    def __init__(self, root, processor=None, split='train', size=(1024, 1024)):
         self.root = Path(root)
         self.processor = processor
         self.split = split
@@ -28,6 +29,9 @@ class CityscapeDataset(Dataset):
         
         image = Image.open(image_path).convert('RGB')
         label = Image.open(label_path)
+        
+        if self.processor is None:
+            return image.resize(self.size), label
         
         if self.size == (1024, 1024):
             processed = self.processor(images=image, segmentation_maps=label, return_tensors="pt")

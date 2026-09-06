@@ -6,8 +6,8 @@ from segmentation_models_pytorch.losses import DiceLoss
 from segmentation_models_pytorch.metrics import get_stats, accuracy, iou_score, f1_score
 import segmentation_models_pytorch as smp
 import itertools
-import pydensecrf.densecrf as dcrf
-from pydensecrf.utils import unary_from_softmax
+# import pydensecrf.densecrf as dcrf
+# from pydensecrf.utils import unary_from_softmax
 import numpy as np
 
 

@@ -211,25 +211,26 @@ if __name__ == "__main__":
     root = '/media/esr/ssd0/dataset/2025-01-10/'
     
     # Check the dataset directly
-    ugm_dataset = UGMDataset(root, return_teacher_logits=True, size=(256, 256), use_refinement=True, entropy_threshold=0.25)
-    for i in range(len(ugm_dataset)):
-        image, t_logits, refined_label = ugm_dataset[i]
-        print(f"Image shape: {image.shape}, Teacher logits shape: {t_logits.shape if t_logits is not None else 'N/A'}, Refined label shape: {refined_label.shape if refined_label is not None else 'N/A'}")
-        break
+    ugm_dataset = UGMDataset(root, split="test", return_teacher_logits=True, size=(256, 256), use_refinement=True, entropy_threshold=0.25)
+    print(f"Number of samples in dataset: {len(ugm_dataset)}")
+    # for i in range(len(ugm_dataset)):
+    #     image, t_logits, refined_label = ugm_dataset[i]
+    #     print(f"Image shape: {image.shape}, Teacher logits shape: {t_logits.shape if t_logits is not None else 'N/A'}, Refined label shape: {refined_label.shape if refined_label is not None else 'N/A'}")
+    #     break
         
     
     
-    # Check the data module
-    dm = UGMDataModule(root, return_teacher_logits=True, batch_size=4, num_workers=4, size=(256, 256), use_refinement=True)
-    dm.setup()
+    # # Check the data module
+    # dm = UGMDataModule(root, return_teacher_logits=True, batch_size=4, num_workers=4, size=(256, 256), use_refinement=True)
+    # dm.setup()
 
-    train_loader = dm.train_dataloader()
-    val_loader = dm.val_dataloader()
-    test_loader = dm.test_dataloader()
+    # train_loader = dm.train_dataloader()
+    # val_loader = dm.val_dataloader()
+    # test_loader = dm.test_dataloader()
     
-    print(f"Number of training samples: {len(dm.train_dataset)}")
+    # print(f"Number of training samples: {len(dm.train_dataset)}")
 
-    for batch in train_loader:
-        images, t_logits, refined_labels = batch
-        print(f"Batch size: {images.shape}, Teacher logits shape: {t_logits.shape if t_logits is not None else 'N/A'}, Refined labels shape: {refined_labels.shape if refined_labels is not None else 'N/A'}")
-        break
+    # for batch in train_loader:
+    #     images, t_logits, refined_labels = batch
+    #     print(f"Batch size: {images.shape}, Teacher logits shape: {t_logits.shape if t_logits is not None else 'N/A'}, Refined labels shape: {refined_labels.shape if refined_labels is not None else 'N/A'}")
+    #     break
